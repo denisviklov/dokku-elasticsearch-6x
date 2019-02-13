@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config"
+set -eo pipefail; [[ $DOKKU_TRACE ]] && set -x
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common-functions"
+source "$PLUGIN_BASE_PATH/common/functions"
+source "$PLUGIN_AVAILABLE_PATH/config/functions"
+if [[ -f "$PLUGIN_AVAILABLE_PATH/docker-options/functions" ]]; then
+  source "$PLUGIN_AVAILABLE_PATH/docker-options/functions"
+fi
+
+# non-generic functions
+
+service_connect() {
+  local SERVICE="$1"
+  local SERVICE_ROOT="$PLUGIN_DATA_ROOT/$SERVICE"
+  local SERVICE_NAME="$(get_service_name "$SERVICE")"
+
+  dokku_log_fail "Not yet implemented"
+}
+
+service_create() {
+  local SERVICE="$1"
+  [[ -z "$SERVICE" ]] && dokku_log_fail "Please specify a name for the service"
+  [[ ! -d "$PLUGIN_DATA_ROOT/$SERVICE" ]] || dokku_log_fail "$PLUGIN_SERVICE service $SERVICE already exists"
+  SERVICE_ROOT="$PLUGIN_DATA_ROOT/$SERVICE"; LINKS_FILE="$SERVICE_ROOT/LINKS"
+
+  service_parse_args "${@:2}"
+
+  service_check_sysctl
+
+  if ! service_image_exists "$SERVICE"; then
+    if [[ "$PLUGIN_DISABLE_PULL" == "true" ]]; then
+      dokku_log_warn "${PLUGIN_DISABLE_PULL_VARIABLE} environment variable detected. Not running pull command." 1>&2
+      dokku_log_warn "   docker pull ${IMAGE}" 1>&2
+      dokku_log_warn "$PLUGIN_SERVICE service creation failed"
+      exit 1
+    fi
+    docker pull "$PLUGIN_IMAGE:$PLUGIN_IMAGE_VERSION" || dokku_log_fail "$PLUGIN_SERVICE image $PLUGIN_IMAGE:$PLUGIN_IMAGE_VERSION pull failed"
+  fi
+
+  mkdir -p "$SERVICE_ROOT" || dokku_log_fail "Unable to create service directory"
+  mkdir -p "$SERVICE_ROOT/data" || dokku_log_fail "Unable to create service data directory"
+  mkdir -p "$SERVICE_ROOT/config" || dokku_log_fail "Unable to create service config directory"
+  touch "$LINKS_FILE"
+
+  [[ -n "$SERVICE_CUSTOM_ENV" ]] && ELASTICSEARCH_CUSTOM_ENV="$SERVICE_CUSTOM_ENV"
+  if [[ -n $ELASTICSEARCH_CUSTOM_ENV ]]; then
+    echo "$ELASTICSEARCH_CUSTOM_ENV" | tr ';' "\n" > "$SERVICE_ROOT/ENV"
+  else
+    echo "" > "$SERVICE_ROOT/ENV"
+  fi
+  service_create_container "$SERVICE"
+}
+
+service_create_container() {
+  local SERVICE="$1"
+  local SERVICE_ROOT="$PLUGIN_DATA_ROOT/$SERVICE"
+  local SERVICE_HOST_ROOT="$PLUGIN_DATA_HOST_ROOT/$SERVICE"
+  local SERVICE_NAME="$(get_service_name "$SERVICE")"
+
+  local ELASTICSEARCH_MAJOR_VERSION=$(echo "$PLUGIN_IMAGE_VERSION" | cut -d '.' -f 1 )
+
+  if [[ "$ELASTICSEARCH_MAJOR_VERSION" -eq "2" ]]; then
+    ID=$(docker run --name "$SERVICE_NAME" -v "$SERVICE_HOST_ROOT/data:/usr/share/elasticsearch/data" -v "$SERVICE_HOST_ROOT/config:/usr/share/elasticsearch/config" --env-file="$SERVICE_ROOT/ENV" -d --restart always --label dokku=service --label dokku.service=elasticsearch "$PLUGIN_IMAGE:$PLUGIN_IMAGE_VERSION")
+    echo "$ID" > "$SERVICE_ROOT/ID"
+
+    dokku_log_info2 "Copying config files into place"
+    retry-docker-command "$ID" "cp -arfp --no-clobber /etc/elasticsearch/. /usr/share/elasticsearch/config/"
+    retry-docker-command "$ID" "echo 'network.host: 0.0.0.0' >> /usr/share/elasticsearch/config/elasticsearch.yml"
+    retry-docker-command "$ID" "test -f /usr/share/elasticsearch/config/jvm.options && sed -i.bak 's#Xms2g#Xms512m#g; s#Xmx2g#Xmx512m#g'; true"
+    retry-docker-command "$ID" "rm -rf /etc/elasticsearch && ln -sfn /usr/share/elasticsearch/config /etc/elasticsearch"
+    retry-docker-command "$ID" "chown -R root:elasticsearch /etc/elasticsearch"
+    docker restart "$ID" > /dev/null
+  else
+    dokku_log_info2 "Extracting config files"
+    local TMPID=$(docker create "$PLUGIN_IMAGE:$PLUGIN_IMAGE_VERSION")
+    docker cp "${TMPID}:/usr/share/elasticsearch/config/" - | tar -x -C "$SERVICE_HOST_ROOT/config" --strip-components=1
+    docker rm -v "${TMPID}"
+    if [[ "$ELASTICSEARCH_MAJOR_VERSION" -eq "6" ]]; then
+      sed -i.bak 's#Xms2g#Xms512m#g; s#Xmx2g#Xmx512m#g' "$SERVICE_HOST_ROOT/config/jvm.options"
+    fi
+
+    ID=$(docker run --name "$SERVICE_NAME" -v "$SERVICE_HOST_ROOT/data:/usr/share/elasticsearch/data" -v "$SERVICE_HOST_ROOT/config:/usr/share/elasticsearch/config" --env-file="$SERVICE_ROOT/ENV" -d --restart always --label dokku=service --label dokku.service=elasticsearch "$PLUGIN_IMAGE:$PLUGIN_IMAGE_VERSION")
+    echo "$ID" > "$SERVICE_ROOT/ID"
+
+    retry-docker-command "$ID" "chown -R 1000:0 /usr/share/elasticsearch/config; chown 1000:0 /usr/share/elasticsearch/data"
+  fi
+
+  dokku_log_verbose_quiet "Waiting for container to be ready"
+  docker run --rm --link "$SERVICE_NAME:$PLUGIN_COMMAND_PREFIX" dokkupaas/wait:0.2 -p "$PLUGIN_DATASTORE_WAIT_PORT" -t 60 > /dev/null
+
+  dokku_log_info2 "$PLUGIN_SERVICE container created: $SERVICE"
+  service_info "$SERVICE"
+}
+
+retry-docker-command() {
+  local ID="$1" COMMAND="$2"
+  local i=0 success=false
+  until [ $i -ge 100 ]; do
+    set +e; docker exec -it "$ID" sh -c "$COMMAND" 2> /dev/null; exit_code=$? ; set -e
+    if [[ "$exit_code" == 0 ]]; then
+      success=true
+      break
+    fi
+    i=$(( i + 1 ))
+    sleep 1
+  done
+  if [[ $i -gt 0 ]]; then
+    dokku_log_verbose "Container command retried ${i} time(s): ${COMMAND}"
+  fi
+  [[ "$success" == "true" ]] || dokku_log_fail "Failed to run command: ${COMMAND}"
+}
+
+service_export() {
+  local SERVICE="$1"
+  local SERVICE_ROOT="$PLUGIN_DATA_ROOT/$SERVICE"
+
+  dokku_log_fail "Not yet implemented"
+}
+
+service_import() {
+  local SERVICE="$1"
+  local SERVICE_ROOT="$PLUGIN_DATA_ROOT/$SERVICE"
+  local SERVICE_HOST_ROOT="$PLUGIN_DATA_HOST_ROOT/$SERVICE"
+  local SERVICE_NAME="$(get_service_name "$SERVICE")"
+
+  dokku_log_fail "Not yet implemented"
+}
+
+service_start() {
+  local SERVICE="$1"
+  local QUIET="$2"
+  local SERVICE_ROOT="$PLUGIN_DATA_ROOT/$SERVICE"
+  local SERVICE_NAME="$(get_service_name "$SERVICE")"
+  local ID=$(docker ps -f status=running --no-trunc | grep -e "$SERVICE_NAME$" | awk '{print $1}') || true
+  if [[ -n $ID ]]; then
+    [[ -z $QUIET ]] && dokku_log_warn "Service is already started"
+    return 0
+  fi
+
+  dokku_log_info2_quiet "Starting container"
+  local PREVIOUS_ID=$(docker ps -f status=exited --no-trunc | grep -e "$SERVICE_NAME$" | awk '{print $1}') || true
+
+  if [[ -n $PREVIOUS_ID ]]; then
+    docker start "$PREVIOUS_ID" > /dev/null
+    service_port_unpause "$SERVICE"
+    dokku_log_info2 "Container started"
+  elif service_image_exists "$SERVICE"; then
+    service_create_container "$SERVICE"
+  else
+    dokku_log_verbose_quiet "Neither container nor valid configuration exists for $SERVICE"
+  fi
+}
+
+service_url() {
+  local SERVICE="$1"
+  local SERVICE_DNS_HOSTNAME="$(service_dns_hostname "$SERVICE")"
+  echo "$PLUGIN_SCHEME://$SERVICE_DNS_HOSTNAME:${PLUGIN_DATASTORE_PORTS[0]}"
+}
+
+service_check_sysctl() {
+  local VM_MAX_MAP_COUNT_CURRENT=$(sysctl -n vm.max_map_count)
+  local VM_MAX_MAP_COUNT_REQUIRED=262144
+
+  if [ "$VM_MAX_MAP_COUNT_CURRENT" -lt "$VM_MAX_MAP_COUNT_REQUIRED" ]; then
+    dokku_log_fail "Please update /etc/systctl.conf with 'vm.max_map_count = 262144' to accommodate Elasticsearch."
+  fi
+}
