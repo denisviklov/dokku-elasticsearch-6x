@@ -1,7 +1,6 @@
-# dokku elasticsearch [![Build Status](https://img.shields.io/travis/dokku/dokku-elasticsearch.svg?branch=master "Build Status")](https://travis-ci.org/dokku/dokku-elasticsearch) [![IRC Network](https://img.shields.io/badge/irc-freenode-blue.svg "IRC Freenode")](https://webchat.freenode.net/?channels=dokku)
 
-Official elasticsearch plugin for dokku. Currently defaults to installing [elasticsearch 2.3.5](https://hub.docker.com/_/elasticsearch/).
-It's possible to install Elasticsearch 5.x, but it does require some manual setup. 
+
+This is a hard fork from Official elasticsearch plugin for dokku. Because I stuck with a problem that 6+ versions don't work with the original plugin but maintener refused new patches and announces the closure of the project.
 
 ## requirements
 
@@ -12,18 +11,25 @@ It's possible to install Elasticsearch 5.x, but it does require some manual setu
 
 ```shell
 # on 0.4.x+
-sudo dokku plugin:install https://github.com/dokku/dokku-elasticsearch.git elasticsearch
+sudo dokku plugin:install https://github.com/denisviklov/dokku-elasticsearch-6x.git elasticsearch
 ```
 
-If you want to run elasticsearch 5.x, there's a requirement to increase the `vm.max_map_count`
+There's a requirement to increase the `vm.max_map_count`
 value in `/etc/sysctl.conf`.
 
 ```shell
+# you SHOULD set image version explicitly
+export ELASTICSEARCH_IMAGE="elasticsearch"
+export ELASTICSEARCH_IMAGE_VERSION="6.6.0"
+
 # add or update: vm.max_map_count = 262144
 vi /etc/sysctl.conf
 
 # load the change variables from /etc/sysctl.conf
-sysctl -p 
+sysctl -p
+
+# start new dokku service
+dokku elasticsearch:create lolipop
 ```
 
 ## commands
